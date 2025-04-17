@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Souls-like Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>body { margin: 0; overflow: hidden; } canvas { display: block; }</style>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.js"></script>
+</head>
+<body>
+  <script>
+    const config = {
+      type: Phaser.AUTO,
+      width: 800,
+      height: 480,
+      backgroundColor: '#121212',
+      physics: { default: 'arcade', arcade: { gravity: { y: 800 }, debug: false } },
+      scene: { preload, create, update },
+      scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH }
+    };
+    const game = new Phaser.Game(config);
+
+    let player, cursors, attackKey, healKey, isAttacking = false;
+    let playerHealth = 100, stamina = 100, potions = 0;
+    let platforms, enemies, healthBar, staminaBar, hudText, slashFX, levelCompleteText;
+    let potionItem, boss, bossPhase = 0;
+
+    function preload() {
+      this.load.spritesheet('knight', 'https://i.imgur.com/T6J2VUp.png', { frameWidth: 32, frameHeight: 32 });
+      this.load.image('ground', 'https://i.imgur.com/1cXfkkF.png');
+      this.load.image('enemy', 'https://i.imgur.com/GsS8yYr.png');
+      this.load.image('potion', 'https://i.imgur.com/rlAIzGi.png');
+      this.load.image('boss', 'https://i.imgur.com/7auuwE4.png');
+      this.load.spritesheet('slash', 'https://i.imgur.com/TsT60kj.png', { frameWidth: 32, frameHeight: 32 });
+      this.load.image('door', 'https://i.imgur.com/aYH2AFV.png');
+    }
+
+    function create() {
+      // Platforms
+      platforms = this.physics.add.staticGroup();
+      platforms.create(400, 460, 'ground').setScale(5, 1).refreshBody();
+      platforms.create(600, 360, 'ground');
+      platforms.create(200, 280, 'ground');
+
+      // Player
+      player = this.physics.add.sprite(100, 300, 'knight').setScale(2).setCollideWorldBounds(true);
+      this.physics.add.collider(player, platforms);
+
+      // Player animations
+      this.anims.create({ key: 'idle', frames: this.anims.generateFrameNumbers('knight', { start: 0, end: 3 }), frameRate: 6, repeat: -1 });
+      this.anims.create({ key: 'run', frames: this.anims.generateFrameNumbers('knight', { start: 4, end: 7 }), frameRate: 10, repeat: -1 });
+      this.anims.create({ key: 'attack', frames: this.anims.generateFrameNumbers('knight', { start: 8, end: 13 }), frameRate: 12, repeat: 0 });
+
+      // Slash FX
+      this.anims.create({ key: 'slash_fx', frames: this.anims.generateFrameNumbers('slash', { start: 0, end: 4 }), frameRate: 20, repeat: 0 });
+
+      cursors = this.input.keyboard.createCursorKeys();
+      attackKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+      healKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.H);
+
+      // Boss: Corrupted Knight
+      boss = this.physics.add.sprite(600, 200, 'boss').setScale(2).setCollideWorldBounds(true);
+      this.physics.add.collider(boss, platforms);
+      this.physics.add.overlap(player, boss, () => damagePlayer(this));
+
+      // Boss Phase system
+      bossPhase = 0;
+
+      // Level complete door
+      levelCompleteText = this.add.text(600, 300, '', { font: '24px Arial', fill: '#fff' });
+      levelCompleteText.setOrigin(0.5, 0.5);
+
+      // UI Elements
+      healthBar = this.add.graphics();
+      staminaBar = this.add.graphics();
+      hudText = this.add.text(20, 75, '', { font: '16px Arial', fill: '#fff' });
+
+      updateHUD();
+    }
+
+    function update() {
+      if (!player.active || boss.active === false) return;
+
+      let moving = false;
+
+      if (cursors.left.isDown) {
+        player.setVelocityX(-160);
+        player.anims.play('run', true);
+        player.setFlipX(true);
+        moving = true;
+      } else if (cursors.right.isDown) {
+        player.setVelocityX(160);
+        player.anims.play('run', true);
+        player.setFlipX(false);
+        moving = true;
+      } else {
+        player.setVelocityX(0);
+      }
+
+      if (!moving && !isAttacking) {
+        player.anims.play('idle', true);
+      }
+
+      if (cursors.up.isDown && player.body.onFloor()) {
+        player.setVelocityY(-400);
+      }
+
+      if (!isAttacking && Phaser.Input.Keyboard.JustDown(attackKey) && stamina >= 20) {
+        isAttacking = true;
+        stamina -= 20;
+        player.anims.play('attack', true);
+
+        slashFX.setPosition(player.x + (player.flipX ? -32 : 32), player.y);
+        slashFX.setFlipX(player.flipX);
+        slashFX.setVisible(true).play('slash_fx');
+
+        // Damage boss
+        const dist = Phaser.Math.Distance.Between(player.x, player.y, boss.x, boss.y);
+        if (dist < 50) {
+          boss.setTint(0xff4444);
+          this.time.delayedCall(200, () => boss.clearTint());
+          this.time.delayedCall(250, () => bossDamage());
+        }
+
+        this.time.delayedCall(400, () => {
+          isAttacking = false;
+        });
+      }
+
+      // Heal if H is pressed
+      if (Phaser.Input.Keyboard.JustDown(healKey) && potions > 0 && playerHealth < 100) {
+        potions -= 1;
+        playerHealth = Math.min(playerHealth + 40, 100);
+        updateHUD();
+      }
+
+      // Boss logic for phases
+      if (bossPhase === 1) {
+        boss.setVelocityX(0);
+        if (boss.y < 350) {
+          boss.setVelocityY(80);
+        } else if (boss.y > 200) {
+          boss.setVelocityY(-80);
+        }
+        if (boss.y === 200) {
+          bossPhase = 0;
+        }
+      }
+
+      updateHUD();
+    }
+
+    function bossDamage() {
+      bossHealth -= 20;
+      if (bossHealth <= 0) {
+        levelCompleteText.setText('Level Complete! Proceed to next area.');
+        this.physics.add.staticImage(700, 380, 'door').setInteractive().on('pointerdown', () => {
+          goToNextLevel();
+        });
+      }
+    }
+
+    function goToNextLevel() {
+      // Transition to new level
+      this.scene.restart();
+    }
+
+    function damagePlayer(scene) {
+      if (playerHealth > 0) {
+        playerHealth -= 1;
+        updateHUD();
+      }
+      if (playerHealth <= 0) {
+        player.setTint(0xff0000);
+        player.setVelocity(0, 0);
+        player.anims.stop();
+        player.active = false;
+        scene.time.delayedCall(1000, () => {
+          player.clearTint();
+          playerHealth = 100;
+          stamina = 100;
+          potions = 0;
+          player.setPosition(100, 300);
+          player.active = true;
+        });
+      }
+    }
+
+    function updateHUD() {
+      healthBar.clear();
+      healthBar.fillStyle(0xff4444).fillRect(20, 20, playerHealth * 2, 20);
+      healthBar.lineStyle(2, 0xffffff).strokeRect(20, 20, 200, 20);
+
+      staminaBar.clear();
+      staminaBar.fillStyle(0x44ff44).fillRect(20, 50, stamina * 2, 15);
+      staminaBar.lineStyle(2, 0xffffff).strokeRect(20, 50, 200, 15);
+
+      hudText.setText(`Potions: ${potions} | Press H to Heal`);
+    }
+  </script>
+</body>
+</html>
